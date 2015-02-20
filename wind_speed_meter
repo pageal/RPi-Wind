@@ -9,6 +9,8 @@ import struct
 import ctypes
 import socket
 
+the_report_period = 30
+
 class WindSpeedMeter():
     _channel = 0
     _report_period = 5
@@ -36,7 +38,7 @@ class WindSpeedMeter():
                 return addr
         return "127.0.0.1"
 
-    def __init__(self, channel, dir_channel, report_period = 5):
+    def __init__(self, channel, dir_channel, report_period = the_report_period):
         self._channel = channel
         self._dir_channel = dir_channel
         self._report_period = report_period
@@ -66,17 +68,16 @@ class WindSpeedMeter():
         #mc_socket.sendto("init", ("224.0.150.150", 8100))
         
         last_voltage = 0
-        time_last_report = time.clock()*60
+        time_last_report = time.time()
         self._last_sample_pulses = 0
         while(self._stop_requested != True):
-            self._time_now = time.clock()*60
+            self._time_now = time.time()
             voltage = self._adc.read_voltage(self._channel)
             if( (voltage > 0) and (last_voltage == 0)):
                 self._pulses_counter += 1
                 #print("pulses: " + str(self._pulses_counter))
             last_voltage = voltage
 
-            time_now = time.clock()*60
             if(time_now > time_last_report):
                 if(time_now - time_last_report >= self._report_period):
                     speed = (self._pulses_counter - self._last_sample_pulses)/(time_now - time_last_report)
