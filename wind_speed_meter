@@ -8,8 +8,108 @@ import re
 import struct
 import ctypes
 import socket
+import SocketServer
+import BaseHTTPServer
 
-the_report_period = 30
+the_report_period = 5
+
+PAGE_WEATHER = \
+"""
+<!DOCTYPE html>
+<html>
+<body>
+    <h1> Haifa local time: {} </h1>
+    <h1> Our local weather. </h1>
+    <h3>Wind Speed (meter/sec): {} </h3>
+    <h3>Wind Direction (TBD): {}</h3>
+
+    <h1>
+    Anemometer.
+    </h1>
+    <h4>Vcc (Volts): {}</h4>
+    
+</body>
+</html>
+"""
+
+globals()["g_wind_speed"] = 0.0
+globals()["g_wind_direction"] = ""
+globals()["g_vcc"] = 0.0
+
+
+class HTTPHandler(BaseHTTPServer.BaseHTTPRequestHandler):
+    _preview = False
+    _camera = None
+    stop_streaming = False
+
+    def requestline(self):
+        return 1
+
+    def request_version(self):
+        return 'HTTP/5.0'
+
+    def handle(self):
+
+        print("handle request request")
+
+        the_page = PAGE_WEATHER.format(time.asctime(), globals()["g_wind_speed"], globals()["g_wind_direction"], globals()["g_vcc"])
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(the_page)))
+        self.send_header("refresh", str(the_report_period))
+        self.request.send(the_page)
+        self.end_headers()
+
+        
+        
+class NETTYPE:
+    LAN = 1
+    WLAN = 2
+    CELL = 3
+
+class DataServerHTTP :
+    _stop_server = False
+    _main_thread = None
+    _nettype = NETTYPE.LAN
+
+    def GetLocalIP(self):
+        ifconfig_cmd = commands.getoutput("ifconfig")
+        patt = re.compile(r'inet\s*\w*\S*:\s*(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})')
+        addr_list = patt.findall(ifconfig_cmd)
+        for addr in addr_list:
+            if addr == "127.0.0.1":
+                continue
+            if(self._nettype == NETTYPE.CELL):
+                if(addr.find("192.168.") == 0):
+                    continue
+            if(addr.find('.')>0):
+                return addr
+        return "127.0.0.1"
+
+
+    def _HTTPThread(self):
+        IP = self.GetLocalIP()
+        print("http server started at " + IP + ":8090")
+        while (self._stop_server == False):
+            self._http_srv = BaseHTTPServer.HTTPServer((IP, 8090),HTTPHandler)
+            self._http_srv.rbufsize = -1
+            self._http_srv.wbufsize = 100000000
+            try:
+                self._http_srv.handle_request()
+            except Exception as e:
+                pass
+            self._http_srv.socket.close()
+        print("http server finished")
+
+    def Run(self):
+        self._main_thread = threading.Thread(target=self._HTTPThread)
+        self._main_thread.start()
+
+    def Stop(self):
+        self._stop_server=True
+        self._http_srv.socket.close()
+        
 
 class WindSpeedMeter():
     _channel = 0
@@ -71,7 +171,7 @@ class WindSpeedMeter():
         time_last_report = time.time()
         self._last_sample_pulses = 0
         while(self._stop_requested != True):
-            self._time_now = time.time()
+            time_now = time.time()
             voltage = self._adc.read_voltage(self._channel)
             if( (voltage > 0) and (last_voltage == 0)):
                 self._pulses_counter += 1
@@ -80,12 +180,17 @@ class WindSpeedMeter():
 
             if(time_now > time_last_report):
                 if(time_now - time_last_report >= self._report_period):
-                    speed = (self._pulses_counter - self._last_sample_pulses)/(time_now - time_last_report)
+                    speed = (self._pulses_counter - self._last_sample_pulses)
+                    speed = (speed * 3.14159 * 2 * 0.09)/(time_now - time_last_report)
                     print("speed: " + str(speed))
                     vcc = self._adc.read_voltage(8)
-                    dir = self._adc.read_voltage(self._dir_channel)
-                    mc_socket.sendto("VCC: %02f, WS: %02f, WD: %02f" % (vcc, speed, dir), ("224.0.1.200", 8200))
+                    direction = self._adc.read_voltage(self._dir_channel)
+                    mc_socket.sendto("VCC: %02f, WS: %02f, WD: %02f" % (vcc, speed, direction), ("224.0.1.200", 8200))
                     self._last_sample_pulses = self._pulses_counter
+
+                    globals()["g_wind_speed"] = speed
+                    globals()["g_wind_direction"] = str(direction)
+                    globals()["g_vcc"] = vcc
                     time_last_report = time_now
             else:
                 time_last_report = time_now
@@ -101,3 +206,6 @@ class WindSpeedMeter():
 
 sm = WindSpeedMeter(1, 2)
 sm.Start()
+
+srv = DataServerHTTP()
+srv.Run()
