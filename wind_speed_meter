@@ -33,7 +33,7 @@ PAGE_WEATHER = \
 """
 
 globals()["g_wind_speed"] = 0.0
-globals()["g_wind_direction"] = ""
+globals()["g_wind_direction"] = 0.0
 globals()["g_vcc"] = 0.0
 
 class direction_resolver(object):
@@ -44,12 +44,12 @@ class direction_resolver(object):
         self.east = 0.59
         self.se1 = 0.92
         self.se2 = 1.13
-        self.south = 1.57
+        self.south = 1.65
         self.sw1 = 1.57
         self.sw2 = 1.99
         self.west = 2.01
         self.nw1 =  1.80
-        self.nw2 =  1.94
+        self.nw2 =  1.96
 
         self._amp_to_dir_name = {self.north:"N", self.ne1:"NE", self.ne2:"NE",
                             self.east:"E", self.se1:"SE", self.se2:"SE",
