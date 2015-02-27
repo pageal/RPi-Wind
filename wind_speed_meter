@@ -21,7 +21,7 @@ PAGE_WEATHER = \
     <h1> Haifa local time: {} </h1>
     <h1> Our local weather. </h1>
     <h3>Wind Speed (meter/sec): {} </h3>
-    <h3>Wind Direction (TBD): {}</h3>
+    <h3>Wind Direction: {} ({})</h3>
 
     <h1>
     Anemometer.
@@ -36,11 +36,39 @@ globals()["g_wind_speed"] = 0.0
 globals()["g_wind_direction"] = ""
 globals()["g_vcc"] = 0.0
 
+class direction_resolver(object):
+    def __init__(self):
+        self.north = 1.29
+        self.ne1 = 1.34
+        self.ne2 = 0.37
+        self.east = 0.59
+        self.se1 = 0.92
+        self.se2 = 1.13
+        self.south = 1.57
+        self.sw1 = 1.57
+        self.sw2 = 1.99
+        self.west = 2.01
+        self.nw1 =  1.80
+        self.nw2 =  1.94
+
+        self._amp_to_dir_name = {self.north:"N", self.ne1:"NE", self.ne2:"NE",
+                            self.east:"E", self.se1:"SE", self.se2:"SE",
+                            self.south :"S",  self.sw1:"SW", self.sw2:"SW",
+                            self.west:"W", self.nw1:"NW", self.nw2:"NW"}
+
+    def resolve(self, sig_amp):
+        sig_amp_str = "%0.2f"%sig_amp
+        try:
+            dir_name = self._amp_to_dir_name[float(sig_amp_str)]
+            return dir_name
+        except Exception:
+            return " "
 
 class HTTPHandler(BaseHTTPServer.BaseHTTPRequestHandler):
     _preview = False
     _camera = None
     stop_streaming = False
+    _dr = direction_resolver()
 
     def requestline(self):
         return 1
@@ -51,8 +79,13 @@ class HTTPHandler(BaseHTTPServer.BaseHTTPRequestHandler):
     def handle(self):
 
         print("handle request request")
+        time.timezone = -7200
+        curr_time = time.localtime()
 
-        the_page = PAGE_WEATHER.format(time.asctime(), globals()["g_wind_speed"], globals()["g_wind_direction"], globals()["g_vcc"])
+        the_page = PAGE_WEATHER.format(time.asctime(curr_time),globals()["g_wind_speed"],
+                    self._dr.resolve(globals()["g_wind_direction"]),
+                    str(globals()["g_wind_direction"]),
+                    globals()["g_vcc"])
 
         self.send_response(200)
         self.send_header("Content-Type", "text/html")
@@ -185,11 +218,11 @@ class WindSpeedMeter():
                     print("speed: " + str(speed))
                     vcc = self._adc.read_voltage(8)
                     direction = self._adc.read_voltage(self._dir_channel)
-                    mc_socket.sendto("VCC: %02f, WS: %02f, WD: %02f" % (vcc, speed, direction), ("224.0.1.200", 8200))
+                    mc_socket.sendto("VCC: %02f, WS: %0.3f, WD: %0.3f" % (vcc, speed, direction), ("224.0.1.200", 8200))
                     self._last_sample_pulses = self._pulses_counter
 
                     globals()["g_wind_speed"] = speed
-                    globals()["g_wind_direction"] = str(direction)
+                    globals()["g_wind_direction"] = direction
                     globals()["g_vcc"] = vcc
                     time_last_report = time_now
             else:
