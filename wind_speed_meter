@@ -28,7 +28,7 @@ PAGE_WEATHER = \
     Anemometer.
     </h1>
     <h4>Vcc (Volts): {}</h4>
-    
+
 </body>
 </html>
 """
@@ -93,8 +93,8 @@ class HTTPHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         self.request.send(the_page)
         self.end_headers()
 
-        
-        
+
+
 class NETTYPE:
     LAN = 1
     WLAN = 2
@@ -141,7 +141,7 @@ class DataServerHTTP :
     def Stop(self):
         self._stop_server=True
         self._http_srv.socket.close()
-        
+
 
 class WindSpeedMeter():
     _channel = 0
@@ -186,10 +186,8 @@ class WindSpeedMeter():
         self._thread = threading.Thread(target=self.SamplingThread)
         self._thread.start()
         print("sampling thread initialized")
-        
-    def SamplingThread(self):
-        print("sampling thread started")
 
+    def SendMCStatus(self, msg):
         mc_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         #mc_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         mc_socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 100)
@@ -198,7 +196,13 @@ class WindSpeedMeter():
         mreq = struct.pack('4sl', socket.inet_aton("224.0.1.200"), socket.INADDR_ANY)
         mc_socket.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
         #mc_socket.sendto("init", ("224.0.150.150", 8100))
-        
+
+        mc_socket.sendto(msg, ("224.0.1.200", 8200))
+        mc_socket.close()
+
+    def SamplingThread(self):
+        print("sampling thread started")
+
         last_voltage = 0
         time_last_report = time.time()
         self._last_sample_pulses = 0
@@ -217,12 +221,17 @@ class WindSpeedMeter():
                     print("speed: " + str(speed))
                     vcc = self._adc.read_voltage(8)
                     direction = self._adc.read_voltage(self._dir_channel)
-                    mc_socket.sendto("VCC: %02f, WS: %0.3f, WD: %0.3f" % (vcc, speed, direction), ("224.0.1.200", 8200))
-                    self._last_sample_pulses = self._pulses_counter
+                    try:
+                        self.SendMCStatus("VCC: %02f, WS: %0.3f, WD: %0.3f" % (vcc, speed, direction))
+                    except Exception():
+                        pass
+
 
                     globals()["g_wind_speed"] = speed
                     globals()["g_wind_direction"] = direction
                     globals()["g_vcc"] = vcc
+
+                    self._last_sample_pulses = self._pulses_counter
                     time_last_report = time_now
             else:
                 time_last_report = time_now
