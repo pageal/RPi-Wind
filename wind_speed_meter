@@ -12,6 +12,7 @@ import SocketServer
 import BaseHTTPServer
 
 the_report_period = 5
+timezone = 7200
 
 PAGE_WEATHER = \
 """
@@ -79,10 +80,8 @@ class HTTPHandler(BaseHTTPServer.BaseHTTPRequestHandler):
     def handle(self):
 
         print("handle request request")
-        time.timezone = -7200
-        curr_time = time.localtime()
-
-        the_page = PAGE_WEATHER.format(time.asctime(curr_time),globals()["g_wind_speed"],
+        the_page = PAGE_WEATHER.format(time.ctime(int(time.time()+timezone)),
+                    globals()["g_wind_speed"],
                     self._dr.resolve(globals()["g_wind_direction"]),
                     str(globals()["g_wind_direction"]),
                     globals()["g_vcc"])
