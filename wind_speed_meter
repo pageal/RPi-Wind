@@ -3,6 +3,7 @@ from ABE_helpers import ABEHelpers
 import time
 import threading
 import os
+import glob
 import commands
 import re
 import struct
@@ -20,15 +21,14 @@ PAGE_WEATHER = \
 <html>
 <body>
     <h1> Haifa local time: {} </h1>
-    <h1> Our local weather. </h1>
-    <h3>Wind Speed (meter/sec): {} </h3>
-    <h3>Wind Direction: {} ({})</h3>
+    <h1> Local weather data: </h1>
+    <h3> - Wind Speed (meters in sec): [{}] </h3>
+    <h3> - Wind Direction (decoded/raw): [{}] / [{}]</h3>
+    <h3> - Ambient Temperature (Celsius/Fahrenheit): [{}] / [{}]</h3>
 
-    <h1>
-    Anemometer.
-    </h1>
-    <h4>Vcc (Volts): {}</h4>
-
+    <h1>Anemometer satus:</h1>
+    <h3>Vcc (Volts): {}</h3>
+    
 </body>
 </html>
 """
@@ -36,6 +36,28 @@ PAGE_WEATHER = \
 globals()["g_wind_speed"] = 0.0
 globals()["g_wind_direction"] = 0.0
 globals()["g_vcc"] = 0.0
+globals()["g_temp_c"] = 0.0
+globals()["g_temp_f"] = 0.0
+
+class temperature_resolver(object):
+    def __init__(self):
+        #initialize device
+        os.system("modprobe w1-gpio")
+        os.system("modprobe w1-therm")
+        self.dev_dir = '/sys/bus/w1/devices/'
+        self.ds18b20_folder = glob.glob(self.dev_dir + '28*')[0]
+        self.ds18b20_data_file = self.ds18b20_folder + '/w1_slave'
+
+    def temp_read(self):
+        f = open(self.ds18b20_data_file, "r")
+        lines = f.readlines()
+        f.close()
+        t_pos = lines[1].find('t=')
+        if(t_pos != -1):
+            self.raw_temp_str = lines[1][t_pos+2:]
+            self.temp_c = float(self.raw_temp_str)/1000.0
+            self.temp_f = self.temp_c * 9.0/5.0 + 32.0
+        return self.temp_c, self.temp_f
 
 class direction_resolver(object):
     def __init__(self):
@@ -84,6 +106,8 @@ class HTTPHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                     globals()["g_wind_speed"],
                     self._dr.resolve(globals()["g_wind_direction"]),
                     str(globals()["g_wind_direction"]),
+                    globals()["g_temp_c"],
+                    globals()["g_temp_f"],
                     globals()["g_vcc"])
 
         self.send_response(200)
@@ -93,8 +117,8 @@ class HTTPHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         self.request.send(the_page)
         self.end_headers()
 
-
-
+        
+        
 class NETTYPE:
     LAN = 1
     WLAN = 2
@@ -141,7 +165,7 @@ class DataServerHTTP :
     def Stop(self):
         self._stop_server=True
         self._http_srv.socket.close()
-
+        
 
 class WindSpeedMeter():
     _channel = 0
@@ -155,6 +179,9 @@ class WindSpeedMeter():
 
     _IPAddr = "127.0.0.1"
     _CtrlPort = 8200
+
+    _tr = temperature_resolver()
+
 
     def GetLocalIP(self):
         ifconfig_cmd = commands.getoutput("ifconfig")
@@ -199,7 +226,7 @@ class WindSpeedMeter():
 
         mc_socket.sendto(msg, ("224.0.1.200", 8200))
         mc_socket.close()
-
+        
     def SamplingThread(self):
         print("sampling thread started")
 
@@ -221,17 +248,18 @@ class WindSpeedMeter():
                     print("speed: " + str(speed))
                     vcc = self._adc.read_voltage(8)
                     direction = self._adc.read_voltage(self._dir_channel)
+                    temp_c, temp_f = self._tr.temp_read()
                     try:
-                        self.SendMCStatus("VCC: %02f, WS: %0.3f, WD: %0.3f" % (vcc, speed, direction))
-                    except Exception():
+                        self.SendMCStatus("VCC: %02f, WS: %0.3f, WD: %0.3f Tmp: %0.3f" % (vcc, speed, direction, temp_c))
+                    except Exception:
                         pass
-
+                    self._last_sample_pulses = self._pulses_counter
 
                     globals()["g_wind_speed"] = speed
                     globals()["g_wind_direction"] = direction
                     globals()["g_vcc"] = vcc
-
-                    self._last_sample_pulses = self._pulses_counter
+                    globals()["g_temp_c"] = temp_c
+                    globals()["g_temp_f"] = temp_f
                     time_last_report = time_now
             else:
                 time_last_report = time_now
