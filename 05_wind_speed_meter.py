@@ -3,6 +3,7 @@ from ABE_helpers import ABEHelpers
 import time
 import threading
 import os
+import glob
 import commands
 import re
 import struct
@@ -11,7 +12,7 @@ import socket
 import SocketServer
 import BaseHTTPServer
 
-the_report_period = 5
+the_report_period = 10
 timezone = 7200
 
 PAGE_WEATHER = \
@@ -20,22 +21,56 @@ PAGE_WEATHER = \
 <html>
 <body>
     <h1> Haifa local time: {} </h1>
-    <h1> Our local weather. </h1>
-    <h3>Wind Speed (meter/sec): {} </h3>
-    <h3>Wind Direction: {} ({})</h3>
+    <h1> Local weather data: </h1>
+    <h3> - Wind Speed (meters in sec): [{}] </h3>
+    <h3> - Wind Direction (decoded/raw): [{}] / [{}]</h3>
+    <h3> - Wind Dynamo Average Voltage (Volts): {}</h3>
+    <h3> - Temperature sensor Voltage (Volts): {}</h3>
+    <h3> - Ambient Temperature (Celsius/Fahrenheit): [{}] / [{}]</h3>
 
-    <h1>
-    Anemometer.
-    </h1>
-    <h4>Vcc (Volts): {}</h4>
-
+    <h1>Anemometer satus:</h1>
+    <h3>Vcc (Volts): {}</h3>
+    
 </body>
 </html>
 """
 
 globals()["g_wind_speed"] = 0.0
 globals()["g_wind_direction"] = 0.0
+globals()["g_wind_v"] = 0.0
 globals()["g_vcc"] = 0.0
+globals()["g_temp_v"] = 0.0
+globals()["g_temp_c"] = 0.0
+globals()["g_temp_f"] = 0.0
+
+class temperature_resolver(object):
+    def __init__(self):
+        #initialize device
+        os.system("modprobe w1-gpio")
+        os.system("modprobe w1-therm")
+        self.dev_dir = '/sys/bus/w1/devices/'
+
+        try:
+            self.ds18b20_folder = glob.glob(self.dev_dir + '28*')[0]
+            self.ds18b20_data_file = self.ds18b20_folder + '/w1_slave'
+        except:
+            print("temperature_resolver initialization failed")
+            return
+
+    def temp_read(self):
+        try:
+            f = open(self.ds18b20_data_file, "r")
+            lines = f.readlines()
+            f.close()
+            t_pos = lines[1].find('t=')
+            if(t_pos != -1):
+                self.raw_temp_str = lines[1][t_pos+2:]
+                self.temp_c = float(self.raw_temp_str)/1000.0
+                self.temp_f = self.temp_c * 9.0/5.0 + 32.0
+        except:
+            self.temp_c = 0.0
+            self.temp_f = 0.0
+        return self.temp_c, self.temp_f
 
 class direction_resolver(object):
     def __init__(self):
@@ -84,6 +119,10 @@ class HTTPHandler(BaseHTTPServer.BaseHTTPRequestHandler):
                     globals()["g_wind_speed"],
                     self._dr.resolve(globals()["g_wind_direction"]),
                     str(globals()["g_wind_direction"]),
+                    str(globals()["g_wind_v"]),
+                    str(globals()["g_temp_v"]),
+                    globals()["g_temp_c"],
+                    globals()["g_temp_f"],
                     globals()["g_vcc"])
 
         self.send_response(200)
@@ -93,8 +132,8 @@ class HTTPHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         self.request.send(the_page)
         self.end_headers()
 
-
-
+        
+        
 class NETTYPE:
     LAN = 1
     WLAN = 2
@@ -141,7 +180,7 @@ class DataServerHTTP :
     def Stop(self):
         self._stop_server=True
         self._http_srv.socket.close()
-
+        
 
 class WindSpeedMeter():
     _channel = 0
@@ -155,6 +194,9 @@ class WindSpeedMeter():
 
     _IPAddr = "127.0.0.1"
     _CtrlPort = 8200
+
+    _tr = temperature_resolver()
+
 
     def GetLocalIP(self):
         ifconfig_cmd = commands.getoutput("ifconfig")
@@ -170,9 +212,11 @@ class WindSpeedMeter():
                 return addr
         return "127.0.0.1"
 
-    def __init__(self, channel, dir_channel, report_period = the_report_period):
+    def __init__(self, channel = 1, dir_channel = 2, wind_power_channel = 3, report_period = the_report_period):
         self._channel = channel
         self._dir_channel = dir_channel
+        self._wind_power_channel = wind_power_channel
+        self._temp_channel = 4
         self._report_period = report_period
         self._i2c_helper = ABEHelpers()
         self._bus = self._i2c_helper.get_smbus()
@@ -192,47 +236,61 @@ class WindSpeedMeter():
         #mc_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         mc_socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 100)
         mc_socket.bind((self._IPAddr, 8100))
-        #mreq = struct.pack('4sl', socket.inet_aton("224.0.150.150"), socket.INADDR_ANY)
-        mreq = struct.pack('4sl', socket.inet_aton("224.0.1.200"), socket.INADDR_ANY)
+        #mreq = struct.pack('4sl', socket.inet_aton("224.0.0.1"), socket.INADDR_ANY)
+        mreq = struct.pack('4sl', socket.inet_aton("224.0.0.1"), socket.INADDR_ANY)
         mc_socket.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-        #mc_socket.sendto("init", ("224.0.150.150", 8100))
+        #mc_socket.sendto("init", ("224.0.0.1", 8100))
 
-        mc_socket.sendto(msg, ("224.0.1.200", 8200))
+        mc_socket.sendto(msg, ("224.0.0.1", 8200))
         mc_socket.close()
-
+        
     def SamplingThread(self):
         print("sampling thread started")
 
         last_voltage = 0
         time_last_report = time.time()
         self._last_sample_pulses = 0
+        wind_pwr = 0
         while(self._stop_requested != True):
             time_now = time.time()
             voltage = self._adc.read_voltage(self._channel)
             if( (voltage > 0) and (last_voltage == 0)):
                 self._pulses_counter += 1
                 #print("pulses: " + str(self._pulses_counter))
+
+                curr_wind_v = self._adc.read_voltage(self._wind_power_channel)
+                wind_v += curr_wind_v
+
             last_voltage = voltage
+
 
             if(time_now > time_last_report):
                 if(time_now - time_last_report >= self._report_period):
-                    speed = (self._pulses_counter - self._last_sample_pulses)
-                    speed = (speed * 3.14159 * 2 * 0.09)/(time_now - time_last_report)
-                    print("speed: " + str(speed))
+                    pulses = (self._pulses_counter - self._last_sample_pulses)
+                    speed = (pulses * 3.14159 * 2 * 0.09)/(time_now - time_last_report)
                     vcc = self._adc.read_voltage(8)
                     direction = self._adc.read_voltage(self._dir_channel)
+                    wind_v = wind_v/pulses
+                    temp_v = self._adc.read_voltage(self._temp_channel)
+                    temp_c, temp_f = self._tr.temp_read()
                     try:
-                        self.SendMCStatus("VCC: %02f, WS: %0.3f, WD: %0.3f" % (vcc, speed, direction))
-                    except Exception():
+                        msg = "VCC: %02f, WS: %0.3f(%03d), WD: %0.3f WPwr: %0.3f TmpV: %0.3f Tmp: %0.3f" % \
+                        (vcc, speed, pulses, direction, wind_pwr, temp_v, temp_c)
+                        print(msg)
+                        self.SendMCStatus(msg)
+                    except Exception:
                         pass
-
+                    self._last_sample_pulses = self._pulses_counter
 
                     globals()["g_wind_speed"] = speed
                     globals()["g_wind_direction"] = direction
+                    globals()["g_wind_v"] = wind_v
                     globals()["g_vcc"] = vcc
-
-                    self._last_sample_pulses = self._pulses_counter
+                    globals()["g_temp_v"] = temp_v
+                    globals()["g_temp_c"] = temp_c
+                    globals()["g_temp_f"] = temp_f
                     time_last_report = time_now
+                    wind_v = 0
             else:
                 time_last_report = time_now
             time.sleep(0.01)
@@ -245,7 +303,7 @@ class WindSpeedMeter():
             self._thread.join();
         self._thread = None
 
-sm = WindSpeedMeter(1, 2)
+sm = WindSpeedMeter()
 sm.Start()
 
 srv = DataServerHTTP()
