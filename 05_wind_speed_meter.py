@@ -22,7 +22,7 @@ PAGE_WEATHER = \
 <body>
     <h1> Haifa local time: {} </h1>
     <h1> Local weather data: </h1>
-    <h3> - Wind Speed (meters in sec): [{}] </h3>
+    <h3> - Wind Speed (meters in sec/sensor pulses): [{}] / [{}] </h3>
     <h3> - Wind Direction (decoded/raw): [{}] / [{}]</h3>
     <h3> - Wind Dynamo Average Voltage (Volts): {}</h3>
     <h3> - Temperature sensor Voltage (Volts): {}</h3>
@@ -36,6 +36,7 @@ PAGE_WEATHER = \
 """
 
 globals()["g_wind_speed"] = 0.0
+globals()["g_wind_speed_pulses"] = 0.0
 globals()["g_wind_direction"] = 0.0
 globals()["g_wind_v"] = 0.0
 globals()["g_vcc"] = 0.0
@@ -117,6 +118,7 @@ class HTTPHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         print("handle request request")
         the_page = PAGE_WEATHER.format(time.ctime(int(time.time()+timezone)),
                     globals()["g_wind_speed"],
+                    globals()["g_wind_speed_pulses"],
                     self._dr.resolve(globals()["g_wind_direction"]),
                     str(globals()["g_wind_direction"]),
                     str(globals()["g_wind_v"]),
@@ -250,7 +252,7 @@ class WindSpeedMeter():
         last_voltage = 0
         time_last_report = time.time()
         self._last_sample_pulses = 0
-        wind_pwr = 0
+        wind_v = 0
         while(self._stop_requested != True):
             time_now = time.time()
             voltage = self._adc.read_voltage(self._channel)
@@ -270,12 +272,13 @@ class WindSpeedMeter():
                     speed = (pulses * 3.14159 * 2 * 0.09)/(time_now - time_last_report)
                     vcc = self._adc.read_voltage(8)
                     direction = self._adc.read_voltage(self._dir_channel)
-                    wind_v = wind_v/pulses
+                    if(pulses != 0):
+                        wind_v = wind_v/pulses
                     temp_v = self._adc.read_voltage(self._temp_channel)
                     temp_c, temp_f = self._tr.temp_read()
                     try:
-                        msg = "VCC: %02f, WS: %0.3f(%03d), WD: %0.3f WPwr: %0.3f TmpV: %0.3f Tmp: %0.3f" % \
-                        (vcc, speed, pulses, direction, wind_pwr, temp_v, temp_c)
+                        msg = "VCC: %02f, WS: %0.3f(%03d), WD: %0.3f WndV: %0.3f TmpV: %0.3f Tmp: %0.3f" % \
+                        (vcc, speed, pulses, direction, wind_v, temp_v, temp_c)
                         print(msg)
                         self.SendMCStatus(msg)
                     except Exception:
@@ -283,6 +286,7 @@ class WindSpeedMeter():
                     self._last_sample_pulses = self._pulses_counter
 
                     globals()["g_wind_speed"] = speed
+                    globals()["g_wind_speed_pulses"] = pulses
                     globals()["g_wind_direction"] = direction
                     globals()["g_wind_v"] = wind_v
                     globals()["g_vcc"] = vcc
