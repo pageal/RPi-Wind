@@ -9,18 +9,20 @@ import struct
 import ctypes
 import socket
 import math
+import itertools
+import gzip
 
 #this SW is for prototype model using sensors F200-201/2
 
 ###################################
 ## begin: main parameters override
-file_report_period = 5
+file_report_period = 5  #seconds
+file_length = 12*(3600/file_report_period)      #lines per 12 hours
+file_location = "/home/pi/wind_data/"
 ## HW wiring (-1 means - not connected)
 a2d_chan_speed = 1
 a2d_chan_direction = 2
 a2d_chan_vcc = -1
-## HW parameters
-wind_sensor_radius = 0.1 # meters
 ## begin: main parameters override
 ###################################
 
@@ -65,6 +67,7 @@ class sample():
         self.speed_m_per_sec = 0.0
         self.direction_voltage = 0.0
         self.direction_code = ""
+    
 
 
 class wind_speed_meter():
@@ -83,6 +86,7 @@ class wind_speed_meter():
         self._IPAddr = self.get_local_ip()
         self._samples = list()
         self._samples_lock = threading.Lock()        
+        self._display_lock = threading.Lock()        
 
         self._thread_sampling_obj = None
         self._thread_reporting_obj = None
@@ -94,7 +98,42 @@ class wind_speed_meter():
         self._dirs = list()
         self._dirs_volts = list()
         self._dirs_names = ("NN", "NE", "EE", "SE", "SS", "SW", "WW", "NW")
+        self._dirs_file = "/home/pi/PyProj/dirs_calibration.txt"
 
+        self._calibration_restore()
+        self.files_to_compress = list()
+        self.display = False
+
+    def log_at_display(self, log_msg):
+        if(self.display == False):
+            return
+        
+        self._display_lock.acquire()
+        print(log_msg)
+        self._display_lock.release()
+        
+        
+    def _calibration_save(self):
+        fl = open(self._dirs_file, "w")
+        for dir_name, dir in itertools.izip(self._dirs_names, self._dirs_volts):
+            self.log_at_display("{}: {} ({},{})".format(dir_name, dir.dir, dir._rg_low, dir._rg_high))
+            line = "{},{}\n".format(dir_name, dir.dir)
+            fl.write(line)
+        fl.close()
+
+    def _calibration_restore(self):
+        try:
+            fl = open(self._dirs_file, "r")
+        except Exception as e:
+            self.log_at_display("No callibration data to restore")
+            return
+        line = fl.readline()
+        while line != "" :
+            ln_split = line.split(",")
+            self._dirs_volts.append(dir_range(float(ln_split[1].strip())))
+            line = fl.readline()
+            
+        
 
     def get_local_ip(self):
         ifconfig_cmd = commands.getoutput("ifconfig")
@@ -116,6 +155,8 @@ class wind_speed_meter():
         self._thread_sampling_obj.start()
         self._thread_reporting_obj = threading.Thread(target=self._thread_reporting)
         self._thread_reporting_obj.start()
+        self._thread_compression_obj = threading.Thread(target=self._thread_compression)
+        self._thread_compression_obj.start()
 
     def _dir_calibration(self, smpl):
         if(len(self._dirs_stream) == 0):
@@ -140,7 +181,7 @@ class wind_speed_meter():
             self._dirs_stream.pop(0)
 
         #check if callibration is activated
-        print("dirs: " + str(self._dirs_stream))
+        self.log_at_display("dirs: " + str(self._dirs_stream))
         calibration_matches = 0
         for dir in self._dirs_stream:
             if(dir[1]) >= 1 and (dir[1])<1.6:
@@ -148,35 +189,38 @@ class wind_speed_meter():
                     
         if(calibration_matches == 4):
             matches = 0
-            print("Direction callibration is completed:")
-            print("Four consequent directions are cptured for N/E/S/W")
+            self.log_at_display("Direction callibration is completed:\n"\
+            "Four consequent directions are cptured for N/E/S/W")
+            
             self._dirs = self._dirs_stream
             self._dirs_stream = list() #reset the stream of directions searched for callibration samples
             self._dirs_volts = list()
 
             #fill calibration lists
-            north = self._dirs[0][0]
-            self._dirs_volts.append(dir_range(north))
-            dir = self._dirs_volts[len(self._dirs_volts)-1]
-            print("{}: {} ({},{})".format(self._dirs_names[0], dir.dir, dir._rg_low, dir._rg_high))
-            for i in range(1,len(self._dirs)):
+            for i in range(0,len(self._dirs)):
                 v_direction_prev = self._dirs[i-1][0]
+                if( i == 0):
+                    #use WW for NN
+                    v_direction_prev = self._dirs[3][0]
                 v_direction = self._dirs[i][0]
                 d_direction = self._dirs[i][1] #delta from previos v_direction
                 middle_dir = v_direction_prev + round(d_direction/2,1)
                 if(middle_dir > 5):
                     middle_dir -= 5
-                self._dirs_volts.append(dir_range(middle_dir))
-                idx = len(self._dirs_volts)-1
-                dir = self._dirs_volts[idx]
-                print("{}: {} ({},{})".format(self._dirs_names[idx], dir.dir, dir._rg_low, dir._rg_high))
+                dir = dir_range(middle_dir)
+                self._dirs_volts.append(dir)
                 self._dirs_volts.append(dir_range(v_direction))
                 idx = len(self._dirs_volts)-1
                 dir = self._dirs_volts[idx]
-                print("{}: {} ({},{})".format(self._dirs_names[idx], dir.dir, dir._rg_low, dir._rg_high))
+
+            #append last half-direction
+            nw = self._dirs_volts.pop(0)
+            self._dirs_volts.append(nw)
+            self._calibration_save()
+            
         
     def _thread_reporting(self):
-        print("reporting thread started")
+        self.log_at_display("reporting thread started")
         mc_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         #mc_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         mc_socket.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 100)
@@ -188,6 +232,9 @@ class wind_speed_meter():
 
         time_last_report = time.time()
         self._dirs_stream = list()
+        fl_name = "{}wind_{}.csv".format(file_location, time.strftime("%Y%m%d_%H%M%S"))
+        fl = open(fl_name, "w")
+        lines_reported = 0
         while(self._stop_requested != True):
             time_now = time.time()
 
@@ -195,23 +242,47 @@ class wind_speed_meter():
                 time.sleep(0.2)
                 continue
 
-            if(len(self._samples) > 0):
-                self._samples_lock.acquire()
-                smpl = self._samples.pop(0)
-                self._samples_lock.release()
-                if(len(self._dirs_volts)>0):
-                    for i in range(0, len(self._dirs_volts)):
-                        if self._dirs_volts[i].is_in(smpl.direction_voltage):
-                            smpl.direction_code = self._dirs_names[i]
-                            break
-                print("speed={}m/s Vspeed_avg={}V ({} reads) Vdir={}V DIr={}".format(smpl.speed_m_per_sec, smpl.sample_average_voltage, smpl.voltage_reads, smpl.direction_voltage, smpl.direction_code))
+            if(len(self._samples) == 0):
+                continue
 
-                self._dir_calibration(smpl)
+            if(lines_reported >= file_length):
+                #open new file if current is full 
+                fl.close()
+                self.files_to_compress.append(fl_name)
+                fl_name = "{}wind_{}.csv".format(file_location, time.strftime("%Y%m%d_%H%M%S"))
+                fl = open(fl_name, "w")
+                lines_reported = 0
+                
+            self._samples_lock.acquire()
+            smpl = self._samples.pop(0)
+            self._samples_lock.release()
+            if(len(self._dirs_volts)>0):
+                for i in range(0, len(self._dirs_volts)):
+                    if self._dirs_volts[i].is_in(smpl.direction_voltage):
+                        smpl.direction_code = self._dirs_names[i]
+                        break
+            self.log_at_display("REPORTED: speed={}m/s Vspeed_avg={}V ({} reads) Vdir={}V DIr={}".format(smpl.speed_m_per_sec, smpl.sample_average_voltage, smpl.voltage_reads, smpl.direction_voltage, smpl.direction_code))
+            fl.write("{},{}\n".format(smpl.direction_code, smpl.speed_m_per_sec))
+            lines_reported+=1
+            
+            self._dir_calibration(smpl)
                 
             time_last_report = time_now
 
+    def _thread_compression(self):
+        while(self._stop_requested != True):
+            if(len(self.files_to_compress) == 0):
+                continue
+            f_name = self.files_to_compress.pop(0)
+            f_in = open(f_name, 'rb')
+            f_out = gzip.open(f_name + '.gz', 'wb')
+            f_out.writelines(f_in)
+            f_out.close()
+            f_in.close()
+            os.remove(f_name)
+
     def _thread_sampling(self):
-        print("sampling thread started")
+        self.log_at_display("sampling thread started")
         speed_reads_counter = 0
         last_sample_timestamp = 0
         time_now = time.time()
@@ -252,7 +323,7 @@ class wind_speed_meter():
                             
             self._samples_lock.acquire()
             self._samples.append(smpl)
-            print("speed={}m/s Vspeed_avg={}V ({} reads) Vdir={}V List_len={}".format(smpl.speed_m_per_sec, smpl.sample_average_voltage, smpl.voltage_reads, smpl.direction_voltage, len(self._samples)))
+            self.log_at_display("CAPTURED: speed={}m/s Vspeed_avg={}V ({} reads) Vdir={}V List_len={}".format(smpl.speed_m_per_sec, smpl.sample_average_voltage, smpl.voltage_reads, smpl.direction_voltage, len(self._samples)))
             self._samples_lock.release()
 
             speed_reads_counter = 0
@@ -261,12 +332,15 @@ class wind_speed_meter():
 
 
     def Stop(self):
-        if(self._thread == None):
-            return
         self._stop_requested = True
-        if(self._thread.isAlive()):
-            self._thread.join();
-        self._thread = None
+        if(self._thread_sampling_obj.isAlive()):
+            self._thread_sampling_obj.join();
+        if(self._thread_reporting_obj.isAlive()):
+            self._thread_reporting_obj.join();
+        if(self._thread_compression_obj.isAlive()):
+            self._thread_compressions_obj.join();
 
 sm = wind_speed_meter()
+if(__name__ == "__main__"):
+    sm.display = True
 sm.start()
